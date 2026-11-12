@@ -1,0 +1,475 @@
+name: Build MeBook APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android Project Files
+        run: |
+          mkdir -p app/src/main/java/com/mebook/app
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+
+          # Root build.gradle
+          cat << 'EOF' > build.gradle
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.2.2'
+                  classpath 'com.google.gms:google-services:4.4.1'
+              }
+          }
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          EOF
+
+          # settings.gradle
+          cat << 'EOF' > settings.gradle
+          rootProject.name = "MeBook"
+          include ':app'
+          EOF
+
+          # Move google-services.json to app folder if in root
+          if [ -f google-services.json ]; then
+            cp google-services.json app/
+          fi
+
+          # app/build.gradle
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+              id 'com.google.gms.google-services'
+          }
+
+          android {
+              namespace 'com.mebook.app'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.mebook.app"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+                  debug {
+                      minifyEnabled false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+              implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+              implementation platform('com.google.firebase:firebase-bom:32.8.0')
+              implementation 'com.google.firebase:firebase-messaging'
+          }
+          EOF
+
+          # AndroidManifest.xml
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="MeBook"
+                  android:roundIcon="@android:drawable/sym_def_app_icon"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@style/Theme.AppCompat.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".IncomingCallActivity"
+                      android:showWhenLocked="true"
+                      android:turnScreenOn="true"
+                      android:excludeFromRecents="true"
+                      android:launchMode="singleTop"
+                      android:exported="true" />
+
+                  <service
+                      android:name=".MyFirebaseMessagingService"
+                      android:exported="false">
+                      <intent-filter>
+                          <action android:name="com.google.firebase.MESSAGING_EVENT" />
+                      </intent-filter>
+                  </service>
+
+              </application>
+          </manifest>
+          EOF
+
+          # MainActivity.java (WebView pointing to Vercel with WebRTC Camera/Mic)
+          cat << 'EOF' > app/src/main/java/com/mebook/app/MainActivity.java
+          package com.mebook.app;
+
+          import android.Manifest;
+          import android.content.pm.PackageManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.webkit.PermissionRequest;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+
+          public class MainActivity extends AppCompatActivity {
+              private WebView webView;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  webView = new WebView(this);
+                  setContentView(webView);
+
+                  requestPermissions();
+
+                  WebSettings ws = webView.getSettings();
+                  ws.setJavaScriptEnabled(true);
+                  ws.setDomStorageEnabled(true);
+                  ws.setDatabaseEnabled(true);
+                  ws.setMediaPlaybackRequiresUserGesture(false);
+                  ws.setAllowFileAccess(true);
+
+                  webView.setWebViewClient(new WebViewClient());
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onPermissionRequest(final PermissionRequest request) {
+                          runOnUiThread(() -> request.grant(request.getResources()));
+                      }
+                  });
+
+                  webView.loadUrl("https://mebook-rho.vercel.app/");
+              }
+
+              private void requestPermissions() {
+                  String[] perms = {
+                      Manifest.permission.CAMERA,
+                      Manifest.permission.RECORD_AUDIO,
+                      Manifest.permission.MODIFY_AUDIO_SETTINGS
+                  };
+                  for (String p : perms) {
+                      if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
+                          ActivityCompat.requestPermissions(this, perms, 101);
+                          break;
+                      }
+                  }
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                          ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 102);
+                      }
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          EOF
+
+          # IncomingCallActivity.java (Full screen call UI with Ringtone)
+          cat << 'EOF' > app/src/main/java/com/mebook/app/IncomingCallActivity.java
+          package com.mebook.app;
+
+          import android.app.KeyguardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.media.Ringtone;
+          import android.media.RingtoneManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Vibrator;
+          import android.view.WindowManager;
+          import android.widget.Button;
+          import android.widget.TextView;
+          import androidx.appcompat.app.AppCompatActivity;
+
+          public class IncomingCallActivity extends AppCompatActivity {
+              private Ringtone ringtone;
+              private Vibrator vibrator;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                      setShowWhenLocked(true);
+                      setTurnScreenOn(true);
+                      KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+                      if (km != null) km.requestDismissKeyguard(this, null);
+                  } else {
+                      getWindow().addFlags(
+                          WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                          WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
+                          WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
+                          WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                      );
+                  }
+
+                  setContentView(R.layout.activity_incoming_call);
+
+                  String callerName = getIntent().getStringExtra("callerName");
+                  if (callerName == null || callerName.isEmpty()) callerName = "MeBook Call";
+
+                  TextView tvCaller = findViewById(R.id.tvCallerName);
+                  tvCaller.setText(callerName);
+
+                  try {
+                      Uri ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
+                      ringtone = RingtoneManager.getRingtone(getApplicationContext(), ringtoneUri);
+                      if (ringtone != null) ringtone.play();
+
+                      vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                      long[] pattern = {0, 1000, 1000};
+                      if (vibrator != null) vibrator.vibrate(pattern, 0);
+                  } catch (Exception ignored) {}
+
+                  Button btnAccept = findViewById(R.id.btnAccept);
+                  Button btnDecline = findViewById(R.id.btnDecline);
+
+                  btnAccept.setOnClickListener(v -> {
+                      stopRinging();
+                      Intent intent = new Intent(this, MainActivity.class);
+                      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                      startActivity(intent);
+                      finish();
+                  });
+
+                  btnDecline.setOnClickListener(v -> {
+                      stopRinging();
+                      finish();
+                  });
+              }
+
+              private void stopRinging() {
+                  if (ringtone != null && ringtone.isPlaying()) ringtone.stop();
+                  if (vibrator != null) vibrator.cancel();
+              }
+
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  stopRinging();
+              }
+          }
+          EOF
+
+          # MyFirebaseMessagingService.java (Handles background calls)
+          cat << 'EOF' > app/src/main/java/com/mebook/app/MyFirebaseMessagingService.java
+          package com.mebook.app;
+
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.media.RingtoneManager;
+          import android.os.Build;
+          import androidx.core.app.NotificationCompat;
+          import com.google.firebase.messaging.FirebaseMessagingService;
+          import com.google.firebase.messaging.RemoteMessage;
+
+          public class MyFirebaseMessagingService extends FirebaseMessagingService {
+              private static final String CHANNEL_ID = "mebook_call_channel";
+
+              @Override
+              public void onMessageReceived(RemoteMessage remoteMessage) {
+                  String callerName = "MeBook User";
+                  if (remoteMessage.getData().containsKey("fromName")) {
+                      callerName = remoteMessage.getData().get("fromName");
+                  } else if (remoteMessage.getNotification() != null && remoteMessage.getNotification().getTitle() != null) {
+                      callerName = remoteMessage.getNotification().getTitle();
+                  }
+
+                  showIncomingCall(callerName);
+              }
+
+              private void showIncomingCall(String callerName) {
+                  Intent fullScreenIntent = new Intent(this, IncomingCallActivity.class);
+                  fullScreenIntent.putExtra("callerName", callerName);
+                  fullScreenIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+                  PendingIntent fullScreenPendingIntent = PendingIntent.getActivity(
+                      this, 0, fullScreenIntent,
+                      PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0)
+                  );
+
+                  NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel channel = new NotificationChannel(
+                          CHANNEL_ID, "MeBook Calls", NotificationManager.IMPORTANCE_HIGH
+                      );
+                      channel.setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE), null);
+                      channel.enableVibration(true);
+                      if (nm != null) nm.createNotificationChannel(channel);
+                  }
+
+                  NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setSmallIcon(android.R.drawable.sym_def_app_icon)
+                      .setContentTitle("Incoming MeBook Call")
+                      .setContentText(callerName + " is calling...")
+                      .setPriority(NotificationCompat.PRIORITY_MAX)
+                      .setCategory(NotificationCompat.CATEGORY_CALL)
+                      .setAutoCancel(true)
+                      .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
+                      .setFullScreenIntent(fullScreenPendingIntent, true);
+
+                  if (nm != null) nm.notify(1001, builder.build());
+
+                  try {
+                      startActivity(fullScreenIntent);
+                  } catch (Exception ignored) {}
+              }
+          }
+          EOF
+
+          # Layout: activity_incoming_call.xml
+          cat << 'EOF' > app/src/main/res/layout/activity_incoming_call.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:gravity="center"
+              android:background="#0d0a04"
+              android:padding="24dp">
+
+              <TextView
+                  android:layout_width="80dp"
+                  android:layout_height="80dp"
+                  android:background="#d4a017"
+                  android:textColor="#000000"
+                  android:textSize="40sp"
+                  android:textStyle="bold"
+                  android:gravity="center"
+                  android:text="M" />
+
+              <TextView
+                  android:id="@+id/tvCallerName"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:textColor="#f5d76e"
+                  android:textSize="26sp"
+                  android:textStyle="bold"
+                  android:layout_marginTop="20dp"
+                  android:text="Caller Name" />
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:textColor="#b8a86a"
+                  android:textSize="16sp"
+                  android:layout_marginTop="6dp"
+                  android:text="MeBook Incoming Call..." />
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:orientation="horizontal"
+                  android:gravity="center"
+                  android:layout_marginTop="60dp">
+
+                  <Button
+                      android:id="@+id/btnDecline"
+                      android:layout_width="0dp"
+                      android:layout_height="60dp"
+                      android:layout_weight="1"
+                      android:backgroundTint="#a83232"
+                      android:textColor="#ffffff"
+                      android:textStyle="bold"
+                      android:layout_marginEnd="12dp"
+                      android:text="Decline" />
+
+                  <Button
+                      android:id="@+id/btnAccept"
+                      android:layout_width="0dp"
+                      android:layout_height="60dp"
+                      android:layout_weight="1"
+                      android:backgroundTint="#1a7a3a"
+                      android:textColor="#ffffff"
+                      android:textStyle="bold"
+                      android:layout_marginStart="12dp"
+                      android:text="Accept" />
+              </LinearLayout>
+
+          </LinearLayout>
+          EOF
+
+      - name: Install Gradle & Build APK
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.5-bin.zip
+          unzip -q gradle-8.5-bin.zip
+          ./gradle-8.5/bin/gradle wrapper
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK to Download
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeBook-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
